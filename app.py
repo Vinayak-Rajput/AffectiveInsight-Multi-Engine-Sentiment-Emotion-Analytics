@@ -1,33 +1,20 @@
 from flask import Flask, request, jsonify, render_template
 import joblib
-import pickle
-import string
-from nltk.stem import WordNetLemmatizer
-import matplotlib.pyplot as plt
+import numpy as np
 import io
 import base64
+from matplotlib.figure import Figure
 
 app = Flask(__name__)
 
-# Load the trained sentiment analysis model and vectorizer
-classifier = joblib.load('model.pkl')
-tfidf_vectorizer = joblib.load('vectorizer.pkl')
+# Load models and vectorizers
+# Note: Ensure these files exist in the /models directory
+sentiment_model = joblib.load('models/sentiment_model.pkl')
+sentiment_vec = joblib.load('models/sentiment_vectorizer.pkl')
+emotion_model = joblib.load('models/emotion_model.pkl')
+emotion_vec = joblib.load('models/emotion_vectorizer.pkl')
 
-# Load the updated emotion detection model and vectorizer
-emotion_model = joblib.load('emotion_model.pkl')
-emotion_vectorizer = joblib.load('emotion_vectorizer.pkl')
-
-print("Emotion detection model and vectorizer loaded.")  # Debug print
-
-# Emotion mapping
-EMOTION_MAP = {
-    0: "anger",
-    1: "fear",
-    2: "joy",
-    3: "love",
-    4: "sadness",
-    5: "surprise"
-}
+EMOTION_MAP = {0: "anger", 1: "fear", 2: "joy", 3: "love", 4: "sadness", 5: "surprise"}
 
 @app.route("/")
 def home():
@@ -35,60 +22,39 @@ def home():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    input_text = request.json.get("text", "")
+    data = request.get_json()
+    input_text = data.get("text", "")
+    
     if not input_text:
         return jsonify({"error": "No text provided"}), 400
 
-    print("Raw input text:", input_text)  # Debug print
-
-    # Sentiment analysis
-    input_features = tfidf_vectorizer.transform([input_text])
-    y_proba = classifier.predict_proba(input_features)
-    positive_score = float(y_proba[0][1])  # Convert np.float64 to float
+    # 1. Sentiment Analysis
+    feat_sent = sentiment_vec.transform([input_text])
+    pos_score = float(sentiment_model.predict_proba(feat_sent)[0][1])
     sentiment = "Neutral"
-    if positive_score < 0.4:
-        sentiment = "Negative"
-    elif positive_score > 0.6:
-        sentiment = "Positive"
+    if pos_score < 0.4: sentiment = "Negative"
+    elif pos_score > 0.6: sentiment = "Positive"
 
-    # Emotion detection
-    emotion_features = emotion_vectorizer.transform([input_text])
-    emotion_prediction = emotion_model.predict(emotion_features)
-    emotion_probabilities = emotion_model.predict_proba(emotion_features).flatten()
+    # 2. Emotion Detection
+    feat_emot = emotion_vec.transform([input_text])
+    emot_probs = emotion_model.predict_proba(feat_emot).flatten()
+    dom_emot = EMOTION_MAP[np.argmax(emot_probs)]
 
-    # Create barplot for emotions
-    fig, ax = plt.subplots()
-    emotions = [EMOTION_MAP[i] for i in range(len(emotion_probabilities))]
-    ax.bar(emotions, emotion_probabilities, color='skyblue')
-    ax.set_title("Emotion Probabilities")
-    ax.set_ylabel("Probability")
-    ax.set_xlabel("Emotions")
-    plt.tight_layout()
-
-    # Save the plot to a bytes buffer
+    # 3. Thread-Safe Visualization
+    fig = Figure(figsize=(6, 4))
+    ax = fig.subplots()
+    emotions = [EMOTION_MAP[i] for i in range(len(emot_probs))]
+    ax.bar(emotions, emot_probs, color='#4a90e2')
+    ax.set_title("Emotion Probability Distribution")
+    
     buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    base64_image = base64.b64encode(buf.getvalue()).decode("utf-8")
-    buf.close()
-
-    # Map numeric label to emotion name
-    dominant_emotion_index = int(emotion_prediction[0])  # Ensure JSON serializable
-    dominant_emotion = EMOTION_MAP.get(dominant_emotion_index, "Unknown")  # Map to emotion name
-
-    # Debug: print out what we are sending to the frontend
-    print("Returning response:", {
-        "text": input_text,
-        "sentiment": {"score": positive_score, "sentiment": sentiment},
-        "dominant_emotion": {"emotion": dominant_emotion},
-        "emotion_plot": "data:image/png;base64," + base64_image
-    })
+    fig.savefig(buf, format="png")
+    plot_url = base64.b64encode(buf.getvalue()).decode("utf-8")
 
     return jsonify({
-        "text": input_text,
-        "sentiment": {"score": positive_score, "sentiment": sentiment},
-        "dominant_emotion": {"emotion": dominant_emotion},
-        "emotion_plot": "data:image/png;base64," + base64_image
+        "sentiment": {"score": round(pos_score, 2), "label": sentiment},
+        "emotion": {"dominant": dom_emot, "probabilities": emot_probs.tolist()},
+        "plot": "data:image/png;base64," + plot_url
     })
 
 if __name__ == "__main__":
